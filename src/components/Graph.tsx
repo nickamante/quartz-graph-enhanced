@@ -23,11 +23,29 @@ export interface D3Config {
   showTags: boolean;
   focusOnHover?: boolean;
   enableRadial?: boolean;
+  // Highlight the current page's node.
+  highlightCurrentNode?: boolean;
+  // Override the highlight color: a CSS color (theme var or hex), or { light, dark } variants.
+  // Defaults to the theme highlight color, var(--textHighlight).
+  currentNodeHighlightColor?: string | { light?: string; dark?: string };
+  // Adds an X close button. Only applies to the modal views (global / local modal).
+  showCloseButton?: boolean;
+  // Adds +/- depth controls. Only applies to the modal views.
+  showDepthControl?: boolean;
+  // Upper bound for the depth controls.
+  depthControlMaxDepth?: number;
+  // Let "+" pop to "All" (whole vault) past max depth. A graph whose initial depth is -1
+  // (the global graph) can always reach "All" regardless of this flag.
+  depthControlAllowAllAfterMax?: boolean;
 }
 
 export interface GraphOptions {
   localGraph?: Partial<D3Config>;
   globalGraph?: Partial<D3Config>;
+  // Adds a magnifier icon that opens a zoomable, depth-adjustable modal of the local graph.
+  enableLocalModal?: boolean;
+  // Inherits the localGraph config, allows overrides.
+  localModalGraph?: Partial<D3Config>;
 }
 
 const defaultOptions: GraphOptions = {
@@ -45,6 +63,7 @@ const defaultOptions: GraphOptions = {
     removeTags: [],
     focusOnHover: false,
     enableRadial: false,
+    highlightCurrentNode: false,
   },
   globalGraph: {
     drag: true,
@@ -60,6 +79,22 @@ const defaultOptions: GraphOptions = {
     removeTags: [],
     focusOnHover: true,
     enableRadial: true,
+    highlightCurrentNode: false,
+    showCloseButton: false,
+    showDepthControl: false,
+    depthControlMaxDepth: 5,
+    depthControlAllowAllAfterMax: true, // always reachable since the global initial depth is -1
+  },
+  enableLocalModal: false,
+  localModalGraph: {
+    // Inherits localGraph; these are the modal-specific overrides.
+    focusOnHover: true,
+    highlightCurrentNode: true,
+    currentNodeHighlightColor: "var(--textHighlight)",
+    showCloseButton: false,
+    showDepthControl: false,
+    depthControlMaxDepth: 5,
+    depthControlAllowAllAfterMax: false,
   },
 };
 
@@ -67,12 +102,79 @@ export default ((userOpts?: Partial<GraphOptions>) => {
   const Graph: QuartzComponent = ({ displayClass, cfg }: QuartzComponentProps) => {
     const localGraph = { ...defaultOptions.localGraph, ...userOpts?.localGraph };
     const globalGraph = { ...defaultOptions.globalGraph, ...userOpts?.globalGraph };
+    const enableLocalModal = userOpts?.enableLocalModal ?? defaultOptions.enableLocalModal;
+    // Local modal inherits the sidebar localGraph, then the modal defaults, then user overrides.
+    const localModalGraph = {
+      ...localGraph,
+      ...defaultOptions.localModalGraph,
+      ...userOpts?.localModalGraph,
+    };
+
+    const depthLabel = (depth?: number) =>
+      typeof depth === "number" && depth < 0 ? "All" : String(depth ?? 1);
+
+    const depthControls = (initialLabel: string) => (
+      <div class="graph-depth-controls" aria-label="Graph depth">
+        <button
+          class="graph-depth-button graph-depth-decrease"
+          aria-label="Decrease depth"
+          type="button"
+        >
+          &#8722;
+        </button>
+        <span class="graph-depth-label" aria-live="polite">
+          {initialLabel}
+        </span>
+        <button
+          class="graph-depth-button graph-depth-increase"
+          aria-label="Increase depth"
+          type="button"
+        >
+          +
+        </button>
+      </div>
+    );
+
+    const closeButton = () => (
+      <button class="modal-close" aria-label="Close graph" type="button">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <line x1="6" y1="6" x2="18" y2="18" />
+          <line x1="18" y1="6" x2="6" y2="18" />
+        </svg>
+      </button>
+    );
 
     return (
       <div class={classNames(displayClass, "graph")}>
         <h3>{i18n(cfg.locale ?? "en-US").components.graph.title}</h3>
         <div class="graph-outer">
           <div class="graph-container" data-cfg={JSON.stringify(localGraph)}></div>
+          {enableLocalModal && (
+            <button class="local-graph-icon" aria-label="Zoom into Local Graph">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="10.5" cy="10.5" r="7" />
+                <line x1="21" y1="21" x2="15.8" y2="15.8" />
+                <line x1="10.5" y1="7.5" x2="10.5" y2="13.5" />
+                <line x1="7.5" y1="10.5" x2="13.5" y2="10.5" />
+              </svg>
+            </button>
+          )}
           <button class="global-graph-icon" aria-label="Global Graph">
             <svg
               version="1.1"
@@ -100,8 +202,17 @@ export default ((userOpts?: Partial<GraphOptions>) => {
             </svg>
           </button>
         </div>
+        {enableLocalModal && (
+          <div class="local-graph-outer">
+            <div class="local-graph-container" data-cfg={JSON.stringify(localModalGraph)}></div>
+            {localModalGraph.showDepthControl && depthControls(depthLabel(localModalGraph.depth))}
+            {localModalGraph.showCloseButton && closeButton()}
+          </div>
+        )}
         <div class="global-graph-outer">
           <div class="global-graph-container" data-cfg={JSON.stringify(globalGraph)}></div>
+          {globalGraph.showDepthControl && depthControls(depthLabel(globalGraph.depth))}
+          {globalGraph.showCloseButton && closeButton()}
         </div>
       </div>
     );

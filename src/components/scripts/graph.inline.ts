@@ -86,7 +86,28 @@ import {
       return resolved || fallback;
     }
 
-    async function renderGraph(graph, fullSlug, renderGeneration) {
+    // Like resolveColor, but drops any alpha channel so a translucent theme color
+    // (e.g. --textHighlight) renders as a solid node fill rather than a faint wash.
+    function resolveOpaqueColor(value, fallback) {
+      var resolved = resolveColor(value, fallback);
+      var m = resolved && resolved.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/);
+      return m ? "rgb(" + m[1] + ", " + m[2] + ", " + m[3] + ")" : resolved;
+    }
+
+    // Resolves the current-node highlight color. Accepts a CSS color string or { light, dark }
+    // variants (picked by the active theme). Alpha is stripped so the node renders solid.
+    function resolveHighlightColor(value) {
+      var raw = value;
+      if (value && typeof value === "object") {
+        var isDark = document.documentElement.getAttribute("saved-theme") === "dark";
+        raw = (isDark ? value.dark : value.light) || value.light || value.dark;
+      }
+      if (!raw) raw = "var(--textHighlight)";
+      return resolveOpaqueColor(raw, "#fff236");
+    }
+
+    async function renderGraph(graph, fullSlug, renderGeneration, opts) {
+      opts = opts || {};
       var slug = simplifySlug(fullSlug);
       if (slug === "") slug = "index";
       var visited = getVisited();
@@ -111,6 +132,7 @@ import {
       var showTags = config.showTags;
       var focusOnHover = config.focusOnHover;
       var enableRadial = config.enableRadial;
+      var highlightCurrentNode = config.highlightCurrentNode;
 
       var data;
       try {
@@ -226,6 +248,9 @@ import {
       var dark = resolveColor(styles.getPropertyValue("--dark").trim(), "#1a1a1a");
       var light = resolveColor(styles.getPropertyValue("--light").trim(), "#f5f5f5");
       var bodyFont = styles.getPropertyValue("--bodyFont").trim() || "inherit";
+      var currentNodeColor = highlightCurrentNode
+        ? resolveHighlightColor(config.currentNodeHighlightColor)
+        : null;
 
       var app = new PIXI.Application();
       await app.init({
@@ -283,6 +308,8 @@ import {
       var dragStartTime = 0;
       var dragging = false;
       var currentTransform = d3.zoomIdentity;
+      var fitTimeout = null;
+      var currentNodeLabel = null;
 
       function nodeRadius(d) {
         var numLinks = 0;
@@ -390,8 +417,14 @@ import {
         var node = nodes[i];
         var nodeId = node.id;
         var isTagNode = nodeId.startsWith("tags/");
+        var isCurrentNode = nodeId === slug;
         var radius = nodeRadius(node);
         var color = nodeColor(node);
+
+        // Emphasize the current page's node with a distinct color and an always-visible label so
+        // it's easy to spot — without changing its size.
+        var emphasized = highlightCurrentNode && isCurrentNode;
+        var nodeFill = isTagNode ? light : emphasized ? currentNodeColor : color;
 
         var label = new PIXI.Text({
           text: node.text,
@@ -399,17 +432,19 @@ import {
             fontSize: fontSize * 15,
             fill: dark,
             fontFamily: bodyFont,
+            fontWeight: emphasized ? "bold" : "normal",
           },
           resolution: window.devicePixelRatio * 4,
         });
         label.anchor.set(0.5, 1.2);
-        label.alpha = 0;
+        label.alpha = emphasized ? 1 : 0;
         label.scale.set(1 / scale);
         labelsContainer.addChild(label);
+        if (emphasized) currentNodeLabel = label;
 
         var gfx = new PIXI.Graphics();
         gfx.circle(0, 0, radius);
-        gfx.fill({ color: isTagNode ? light : color });
+        gfx.fill({ color: nodeFill });
         if (isTagNode) {
           gfx.stroke({ width: 2, color: tertiary });
         }
@@ -538,9 +573,39 @@ import {
         }
       }
 
+      // Computes a zoom transform that fits the current node layout into the canvas, filling
+      // roughly `fill` of it (so labels are readable and there is room to expand the depth).
+      function computeFitTransform(fill) {
+        if (!nodes.length) return null;
+        var minX = Infinity,
+          minY = Infinity,
+          maxX = -Infinity,
+          maxY = -Infinity;
+        for (var i = 0; i < nodes.length; i++) {
+          var n = nodes[i];
+          if (n.x == null || n.y == null) continue;
+          if (n.x < minX) minX = n.x;
+          if (n.x > maxX) maxX = n.x;
+          if (n.y < minY) minY = n.y;
+          if (n.y > maxY) maxY = n.y;
+        }
+        if (!isFinite(minX)) return null;
+        var gw = Math.max(maxX - minX, 1);
+        var gh = Math.max(maxY - minY, 1);
+        // Nodes are drawn at (sim + width/2, height/2), so the bbox center in stage coords:
+        var cx = (minX + maxX) / 2 + width / 2;
+        var cy = (minY + maxY) / 2 + height / 2;
+        var k = (fill || 0.5) * Math.min(width / gw, height / gh);
+        k = Math.max(0.25, Math.min(k, 4));
+        var tx = width / 2 - k * cx;
+        var ty = height / 2 - k * cy;
+        return d3.zoomIdentity.translate(tx, ty).scale(k);
+      }
+
       if (enableZoom) {
         var zoomed = function (event) {
           currentTransform = event.transform;
+          if (opts.onTransform) opts.onTransform(currentTransform);
           stage.scale.set(currentTransform.k, currentTransform.k);
           stage.position.set(currentTransform.x, currentTransform.y);
 
@@ -556,6 +621,7 @@ import {
 
           for (var i = 0; i < labelsContainer.children.length; i++) {
             var label = labelsContainer.children[i];
+            if (label === currentNodeLabel) continue;
             if (activeLabels.indexOf(label) === -1) {
               label.alpha = scaleOpacity;
             }
@@ -572,6 +638,19 @@ import {
           .on("zoom", zoomed);
 
         d3.select(app.canvas).call(zoom);
+
+        // Local modal: open at a comfortable zoom. On the first open we fit the layout once it
+        // has settled; on depth changes the caller passes the preserved transform so the zoom
+        // stays put.
+        if (opts.initialTransform) {
+          d3.select(app.canvas).call(zoom.transform, opts.initialTransform);
+        } else if (opts.fitView) {
+          fitTimeout = setTimeout(function () {
+            if (stopAnimation) return;
+            var t = computeFitTransform(opts.fitFill);
+            if (t) d3.select(app.canvas).call(zoom.transform, t);
+          }, opts.fitDelay || 600);
+        }
       }
 
       var stopAnimation = false;
@@ -615,6 +694,7 @@ import {
 
       return function () {
         stopAnimation = true;
+        if (fitTimeout) clearTimeout(fitTimeout);
         simulation.stop();
         try {
           app.destroy(true);
@@ -625,7 +705,6 @@ import {
     }
 
     var localCleanups = [];
-    var globalCleanups = [];
     var currentRenderGeneration = 0;
 
     function cleanupLocal() {
@@ -635,71 +714,284 @@ import {
       localCleanups = [];
     }
 
-    function cleanupGlobal() {
-      for (var i = 0; i < globalCleanups.length; i++) {
-        globalCleanups[i]();
-      }
-      globalCleanups = [];
+    // ---- Graph modal controller ----
+    // Drives both the global graph modal and the (opt-in) zoomable local graph modal. The +/-
+    // depth controls and the X close button are wired only when those elements are present in the
+    // DOM (the component renders them based on GraphOptions). The sidebar graph is separate
+    // (renderLocal) and never gets these controls.
+    var MODAL_MIN_DEPTH = 1;
+    var MODAL_DEFAULT_MAX_DEPTH = 5;
+
+    function makeModalState(outerSelector, graphContainerSelector, iconSelector, isLocal) {
+      return {
+        outerSelector: outerSelector,
+        graphContainerSelector: graphContainerSelector,
+        iconSelector: iconSelector,
+        isLocal: isLocal,
+        outers: [],
+        icons: [],
+        cleanups: [],
+        depth: null,
+        baseDepth: null,
+        maxDepth: MODAL_DEFAULT_MAX_DEPTH,
+        allowAllAfterMax: false,
+        hasDepthControls: false,
+        savedTransform: null,
+        iconClickHandler: null,
+        decreaseHandler: null,
+        increaseHandler: null,
+      };
     }
 
-    var globalContainers = [];
-    var globalIcons = [];
+    var globalModal = makeModalState(
+      ".global-graph-outer",
+      ".global-graph-container",
+      ".global-graph-icon",
+      false,
+    );
+    var localModal = makeModalState(
+      ".local-graph-outer",
+      ".local-graph-container",
+      ".local-graph-icon",
+      true,
+    );
+    var modals = [globalModal, localModal];
+
     var documentClickHandler = null;
     var documentKeydownHandler = null;
-    var iconClickHandler = null;
+    var modalCloseHandler = null;
 
-    function hideGlobalGraph() {
-      cleanupGlobal();
-      for (var i = 0; i < globalContainers.length; i++) {
-        globalContainers[i].classList.remove("active");
-        var sidebar = globalContainers[i].closest(".sidebar");
-        if (sidebar) {
-          sidebar.style.zIndex = "";
-        }
+    function cleanupModal(modal) {
+      for (var i = 0; i < modal.cleanups.length; i++) {
+        modal.cleanups[i]();
       }
+      modal.cleanups = [];
     }
 
-    function anyGlobalGraphActive() {
-      for (var i = 0; i < globalContainers.length; i++) {
-        if (globalContainers[i].classList.contains("active")) {
+    function anyModalGraphActive(modal) {
+      for (var i = 0; i < modal.outers.length; i++) {
+        if (modal.outers[i].classList.contains("active")) {
           return true;
         }
       }
       return false;
     }
 
-    function showGlobalGraph() {
-      cleanupGlobal();
+    // -1 = "All" (whole vault). Reachable when the modal's configured depth is < 0 (the global
+    // graph always is) or when it opts in via depthControlAllowAllAfterMax (the local graph).
+    function canReachAllDepth(modal) {
+      return (modal.baseDepth != null && modal.baseDepth < 0) || modal.allowAllAfterMax;
+    }
+
+    function nextDepth(modal, current, delta) {
+      if (current === -1) {
+        // From "All": only stepping down does anything.
+        return delta < 0 ? modal.maxDepth : -1;
+      }
+      var next = current + delta;
+      if (next < MODAL_MIN_DEPTH) return MODAL_MIN_DEPTH;
+      if (next > modal.maxDepth) return canReachAllDepth(modal) ? -1 : modal.maxDepth;
+      return next;
+    }
+
+    function updateDepthControls(modal) {
+      for (var i = 0; i < modal.outers.length; i++) {
+        var outer = modal.outers[i];
+        var label = outer.querySelector(".graph-depth-label");
+        if (label) label.textContent = modal.depth === -1 ? "All" : String(modal.depth);
+        var decreaseButton = outer.querySelector(".graph-depth-decrease");
+        var increaseButton = outer.querySelector(".graph-depth-increase");
+        if (decreaseButton)
+          decreaseButton.disabled = modal.depth !== -1 && modal.depth <= MODAL_MIN_DEPTH;
+        if (increaseButton)
+          increaseButton.disabled =
+            modal.depth === -1 || (!canReachAllDepth(modal) && modal.depth >= modal.maxDepth);
+      }
+    }
+
+    function renderModalGraph(modal) {
+      cleanupModal(modal);
       var currentSlug = getSlugFromUrl();
-      for (var i = 0; i < globalContainers.length; i++) {
-        var container = globalContainers[i];
-        container.classList.add("active");
-        var sidebar = container.closest(".sidebar");
+      for (var i = 0; i < modal.outers.length; i++) {
+        var graphContainer = modal.outers[i].querySelector(modal.graphContainerSelector);
+        if (!graphContainer) continue;
+
+        // Cache the configured base config as data-cfg-base, then re-apply the current depth
+        // (when depth controls are active) before each render.
+        var baseConfig = JSON.parse(
+          graphContainer.dataset["cfgBase"] || graphContainer.dataset["cfg"] || "{}",
+        );
+        if (!graphContainer.dataset["cfgBase"]) {
+          graphContainer.dataset["cfgBase"] = JSON.stringify(baseConfig);
+        }
+        if (modal.depth != null) {
+          baseConfig.depth = modal.depth;
+        }
+        graphContainer.dataset["cfg"] = JSON.stringify(baseConfig);
+
+        var renderOptions = {};
+        if (modal.isLocal) {
+          // Local graph modal: fit-to-view on open, preserving the zoom across depth changes.
+          // (The current-node highlight is driven by the container's data-cfg, not these options.)
+          var fitOnOpen = modal.savedTransform == null;
+          renderOptions.fitView = fitOnOpen;
+          renderOptions.fitFill = 0.5;
+          renderOptions.initialTransform = fitOnOpen ? null : modal.savedTransform;
+          renderOptions.onTransform = function (transform) {
+            modal.savedTransform = transform;
+          };
+        }
+
+        (function (container, options) {
+          renderGraph(container, currentSlug, undefined, options)
+            .then(function (cleanup) {
+              modal.cleanups.push(cleanup);
+            })
+            .catch(function (err) {
+              console.error("[Graph] Modal render error:", err);
+            });
+        })(graphContainer, renderOptions);
+      }
+    }
+
+    function showModalGraph(modal) {
+      cleanupModal(modal);
+      if (modal.isLocal) {
+        // Fresh open: fit-to-view rather than restoring a previous zoom.
+        modal.savedTransform = null;
+      }
+      for (var i = 0; i < modal.outers.length; i++) {
+        modal.outers[i].classList.add("active");
+        var sidebar = modal.outers[i].closest(".sidebar");
         if (sidebar) {
           sidebar.style.zIndex = "1";
         }
+      }
+      if (modal.hasDepthControls) updateDepthControls(modal);
+      renderModalGraph(modal);
+    }
 
-        var graphContainer = container.querySelector(".global-graph-container");
-        if (graphContainer) {
-          (function (gc) {
-            renderGraph(gc, currentSlug, undefined)
-              .then(function (cleanup) {
-                globalCleanups.push(cleanup);
-              })
-              .catch(function (err) {
-                console.error("[Graph] Global render error:", err);
-              });
-          })(graphContainer);
+    function hideModalGraph(modal) {
+      cleanupModal(modal);
+      for (var i = 0; i < modal.outers.length; i++) {
+        modal.outers[i].classList.remove("active");
+        var sidebar = modal.outers[i].closest(".sidebar");
+        if (sidebar) {
+          sidebar.style.zIndex = "";
         }
       }
     }
 
-    function toggleGlobalGraph() {
-      if (anyGlobalGraphActive()) {
-        hideGlobalGraph();
+    function toggleModalGraph(modal) {
+      if (anyModalGraphActive(modal)) {
+        hideModalGraph(modal);
       } else {
-        showGlobalGraph();
+        showModalGraph(modal);
       }
+    }
+
+    function changeDepth(modal, delta) {
+      var next = nextDepth(modal, modal.depth, delta);
+      if (next === modal.depth) return;
+      modal.depth = next;
+      updateDepthControls(modal);
+      renderModalGraph(modal);
+    }
+
+    // Gathers a modal's elements and (re)binds its icon + depth controls. Called on every nav.
+    function setupModalGraph(modal) {
+      modal.outers = Array.from(document.querySelectorAll(modal.outerSelector));
+
+      // Seed the configured starting depth and depthControl options from the container's data-cfg.
+      modal.baseDepth = null;
+      modal.maxDepth = MODAL_DEFAULT_MAX_DEPTH;
+      modal.allowAllAfterMax = false;
+      for (var i = 0; i < modal.outers.length; i++) {
+        var graphContainer = modal.outers[i].querySelector(modal.graphContainerSelector);
+        if (!graphContainer) continue;
+        var baseConfig = JSON.parse(
+          graphContainer.dataset["cfgBase"] || graphContainer.dataset["cfg"] || "{}",
+        );
+        if (!graphContainer.dataset["cfgBase"]) {
+          graphContainer.dataset["cfgBase"] = JSON.stringify(baseConfig);
+        }
+        if (typeof baseConfig.depth === "number") {
+          modal.baseDepth = baseConfig.depth;
+        }
+        if (typeof baseConfig.depthControlMaxDepth === "number") {
+          modal.maxDepth = baseConfig.depthControlMaxDepth;
+        }
+        modal.allowAllAfterMax = !!baseConfig.depthControlAllowAllAfterMax;
+        break;
+      }
+
+      // Depth controls are active only if the component rendered them for this modal.
+      var depthControls = modal.outers.length
+        ? modal.outers[0].querySelector(".graph-depth-controls")
+        : null;
+      modal.hasDepthControls = !!depthControls;
+      // Reset the depth on every navigation. null when depth controls are off (renderGraph then
+      // uses the configured depth as-is).
+      modal.depth = modal.hasDepthControls && modal.baseDepth != null ? modal.baseDepth : null;
+
+      if (modal.isLocal) {
+        modal.savedTransform = null;
+        // Close the local graph modal on navigation (reset behavior).
+        for (var i = 0; i < modal.outers.length; i++) {
+          modal.outers[i].classList.remove("active");
+          var sidebar = modal.outers[i].closest(".sidebar");
+          if (sidebar) sidebar.style.zIndex = "";
+        }
+      }
+
+      // Icon → toggle.
+      if (modal.iconClickHandler) {
+        for (var i = 0; i < modal.icons.length; i++) {
+          modal.icons[i].removeEventListener("click", modal.iconClickHandler);
+        }
+      }
+      modal.icons = Array.from(document.querySelectorAll(modal.iconSelector));
+      modal.iconClickHandler = function () {
+        toggleModalGraph(modal);
+      };
+      for (var i = 0; i < modal.icons.length; i++) {
+        modal.icons[i].addEventListener("click", modal.iconClickHandler);
+      }
+
+      // Depth +/- buttons, scoped to this modal.
+      var decreaseButtons = document.querySelectorAll(
+        modal.outerSelector + " .graph-depth-decrease",
+      );
+      if (modal.decreaseHandler) {
+        for (var i = 0; i < decreaseButtons.length; i++) {
+          decreaseButtons[i].removeEventListener("click", modal.decreaseHandler);
+        }
+      }
+      modal.decreaseHandler = function (e) {
+        e.stopPropagation();
+        changeDepth(modal, -1);
+      };
+      for (var i = 0; i < decreaseButtons.length; i++) {
+        decreaseButtons[i].addEventListener("click", modal.decreaseHandler);
+      }
+
+      var increaseButtons = document.querySelectorAll(
+        modal.outerSelector + " .graph-depth-increase",
+      );
+      if (modal.increaseHandler) {
+        for (var i = 0; i < increaseButtons.length; i++) {
+          increaseButtons[i].removeEventListener("click", modal.increaseHandler);
+        }
+      }
+      modal.increaseHandler = function (e) {
+        e.stopPropagation();
+        changeDepth(modal, 1);
+      };
+      for (var i = 0; i < increaseButtons.length; i++) {
+        increaseButtons[i].addEventListener("click", modal.increaseHandler);
+      }
+
+      if (modal.hasDepthControls) updateDepthControls(modal);
     }
 
     function renderLocal() {
@@ -730,56 +1022,71 @@ import {
 
       renderLocal();
 
-      globalContainers = Array.from(document.querySelectorAll(".global-graph-outer"));
-
-      if (iconClickHandler) {
-        for (var i = 0; i < globalIcons.length; i++) {
-          globalIcons[i].removeEventListener("click", iconClickHandler);
-        }
+      for (var i = 0; i < modals.length; i++) {
+        setupModalGraph(modals[i]);
       }
 
-      globalIcons = Array.from(document.querySelectorAll(".global-graph-icon"));
-      iconClickHandler = function () {
-        toggleGlobalGraph();
-      };
-      for (var i = 0; i < globalIcons.length; i++) {
-        globalIcons[i].addEventListener("click", iconClickHandler);
-      }
-
+      // Click outside a graph modal's box / icon / depth controls closes it.
       if (documentClickHandler) {
         document.removeEventListener("click", documentClickHandler);
       }
       documentClickHandler = function (e) {
-        if (anyGlobalGraphActive()) {
-          var inContainer = e.target.closest(".global-graph-container");
-          var inIcon = e.target.closest(".global-graph-icon");
-          if (!inContainer && !inIcon) {
-            hideGlobalGraph();
+        for (var i = 0; i < modals.length; i++) {
+          var modal = modals[i];
+          if (!anyModalGraphActive(modal)) continue;
+          var inContainer = e.target.closest(modal.graphContainerSelector);
+          var inIcon = e.target.closest(modal.iconSelector);
+          var inControls = e.target.closest(".graph-depth-controls");
+          if (!inContainer && !inIcon && !inControls) {
+            hideModalGraph(modal);
           }
         }
       };
       document.addEventListener("click", documentClickHandler);
 
+      // Escape closes any open graph modal; Ctrl/Cmd+G toggles the global graph.
       if (documentKeydownHandler) {
         document.removeEventListener("keydown", documentKeydownHandler);
       }
       documentKeydownHandler = function (e) {
         if (e.key === "Escape") {
-          if (anyGlobalGraphActive()) {
-            hideGlobalGraph();
+          for (var i = 0; i < modals.length; i++) {
+            if (anyModalGraphActive(modals[i])) hideModalGraph(modals[i]);
           }
           return;
         }
-
         if (e.key === "g" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
           e.preventDefault();
-          toggleGlobalGraph();
+          toggleModalGraph(globalModal);
         }
       };
       document.addEventListener("keydown", documentKeydownHandler);
 
-      if (anyGlobalGraphActive()) {
-        showGlobalGraph();
+      // X close buttons — close whichever graph modal contains them.
+      if (modalCloseHandler) {
+        var previousCloseButtons = document.querySelectorAll(".modal-close");
+        for (var i = 0; i < previousCloseButtons.length; i++) {
+          previousCloseButtons[i].removeEventListener("click", modalCloseHandler);
+        }
+      }
+      modalCloseHandler = function (e) {
+        e.stopPropagation();
+        var closeButton = e.currentTarget;
+        for (var i = 0; i < modals.length; i++) {
+          if (closeButton.closest(modals[i].outerSelector)) {
+            hideModalGraph(modals[i]);
+            return;
+          }
+        }
+      };
+      var closeButtons = document.querySelectorAll(".modal-close");
+      for (var i = 0; i < closeButtons.length; i++) {
+        closeButtons[i].addEventListener("click", modalCloseHandler);
+      }
+
+      // The global graph modal can persist across SPA navigation; re-render it if still open.
+      if (anyModalGraphActive(globalModal)) {
+        showModalGraph(globalModal);
       }
     }
 
@@ -792,15 +1099,18 @@ import {
     }
     document.addEventListener("prenav", function () {
       cleanupLocal();
-      cleanupGlobal();
+      cleanupModal(globalModal);
+      cleanupModal(localModal);
     });
     document.addEventListener("nav", handleNav);
     document.addEventListener("render", handleNav);
 
     function handleThemeChange() {
       renderLocal();
-      if (anyGlobalGraphActive()) {
-        showGlobalGraph();
+      for (var i = 0; i < modals.length; i++) {
+        if (anyModalGraphActive(modals[i])) {
+          renderModalGraph(modals[i]);
+        }
       }
     }
     document.addEventListener("themechange", handleThemeChange);

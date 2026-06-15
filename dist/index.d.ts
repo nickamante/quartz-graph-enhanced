@@ -14,10 +14,21 @@ interface D3Config {
     showTags: boolean;
     focusOnHover?: boolean;
     enableRadial?: boolean;
+    highlightCurrentNode?: boolean;
+    currentNodeHighlightColor?: string | {
+        light?: string;
+        dark?: string;
+    };
+    showCloseButton?: boolean;
+    showDepthControl?: boolean;
+    depthControlMaxDepth?: number;
+    depthControlAllowAllAfterMax?: boolean;
 }
 interface GraphOptions {
     localGraph?: Partial<D3Config>;
     globalGraph?: Partial<D3Config>;
+    enableLocalModal?: boolean;
+    localModalGraph?: Partial<D3Config>;
 }
 declare const _default: (userOpts?: Partial<GraphOptions>) => QuartzComponent;
 
