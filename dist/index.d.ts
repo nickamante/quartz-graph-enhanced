@@ -23,6 +23,7 @@ interface D3Config {
     showDepthControl?: boolean;
     depthControlMaxDepth?: number;
     depthControlAllowAllAfterMax?: boolean;
+    showZoomControl?: boolean;
 }
 interface GraphOptions {
     localGraph?: Partial<D3Config>;

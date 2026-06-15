@@ -37,6 +37,9 @@ export interface D3Config {
   // Let "+" pop to "All" (whole vault) past max depth. A graph whose initial depth is -1
   // (the global graph) can always reach "All" regardless of this flag.
   depthControlAllowAllAfterMax?: boolean;
+  // Adds +/- zoom buttons (bottom-right of the modal) as an alternative to scroll/pinch zoom.
+  // Only applies to the modal views.
+  showZoomControl?: boolean;
 }
 
 export interface GraphOptions {
@@ -84,17 +87,18 @@ const defaultOptions: GraphOptions = {
     showDepthControl: false,
     depthControlMaxDepth: 5,
     depthControlAllowAllAfterMax: true, // always reachable since the global initial depth is -1
+    showZoomControl: false,
   },
   enableLocalModal: false,
   localModalGraph: {
     // Inherits localGraph; these are the modal-specific overrides.
     focusOnHover: true,
     highlightCurrentNode: true,
-    currentNodeHighlightColor: "var(--textHighlight)",
     showCloseButton: false,
     showDepthControl: false,
     depthControlMaxDepth: 5,
     depthControlAllowAllAfterMax: false,
+    showZoomControl: false,
   },
 };
 
@@ -116,7 +120,7 @@ export default ((userOpts?: Partial<GraphOptions>) => {
     const depthControls = (initialLabel: string) => (
       <div class="graph-depth-controls" aria-label="Graph depth">
         <button
-          class="graph-depth-button graph-depth-decrease"
+          class="graph-control-button graph-depth-decrease"
           aria-label="Decrease depth"
           type="button"
         >
@@ -126,7 +130,7 @@ export default ((userOpts?: Partial<GraphOptions>) => {
           {initialLabel}
         </span>
         <button
-          class="graph-depth-button graph-depth-increase"
+          class="graph-control-button graph-depth-increase"
           aria-label="Increase depth"
           type="button"
         >
@@ -150,6 +154,17 @@ export default ((userOpts?: Partial<GraphOptions>) => {
           <line x1="18" y1="6" x2="6" y2="18" />
         </svg>
       </button>
+    );
+
+    const zoomControls = () => (
+      <div class="graph-zoom-controls" aria-label="Zoom">
+        <button class="graph-control-button graph-zoom-in" aria-label="Zoom in" type="button">
+          +
+        </button>
+        <button class="graph-control-button graph-zoom-out" aria-label="Zoom out" type="button">
+          &#8722;
+        </button>
+      </div>
     );
 
     return (
@@ -207,12 +222,14 @@ export default ((userOpts?: Partial<GraphOptions>) => {
             <div class="local-graph-container" data-cfg={JSON.stringify(localModalGraph)}></div>
             {localModalGraph.showDepthControl && depthControls(depthLabel(localModalGraph.depth))}
             {localModalGraph.showCloseButton && closeButton()}
+            {localModalGraph.showZoomControl && zoomControls()}
           </div>
         )}
         <div class="global-graph-outer">
           <div class="global-graph-container" data-cfg={JSON.stringify(globalGraph)}></div>
           {globalGraph.showDepthControl && depthControls(depthLabel(globalGraph.depth))}
           {globalGraph.showCloseButton && closeButton()}
+          {globalGraph.showZoomControl && zoomControls()}
         </div>
       </div>
     );

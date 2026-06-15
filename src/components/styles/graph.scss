@@ -155,31 +155,48 @@
       text-align: center;
       font-variant-numeric: tabular-nums;
     }
+  }
 
-    & > .graph-depth-button {
-      cursor: pointer;
-      width: 1.4rem;
-      height: 1.4rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0;
-      border: 1px solid var(--lightgray);
-      border-radius: 4px;
-      background-color: var(--light);
-      color: var(--dark);
-      font-size: 1rem;
-      line-height: 1;
-      transition: background-color 0.2s ease;
+  // Shared appearance for the small +/- control buttons (depth and zoom).
+  .graph-control-button {
+    cursor: pointer;
+    width: 1.4rem;
+    height: 1.4rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--lightgray);
+    border-radius: 4px;
+    background-color: var(--light);
+    color: var(--dark);
+    font-size: 1rem;
+    line-height: 1;
+    transition: background-color 0.2s ease;
 
-      &:hover:not(:disabled) {
-        background-color: var(--lightgray);
-      }
+    &:hover:not(:disabled) {
+      background-color: var(--lightgray);
+    }
 
-      &:disabled {
-        opacity: 0.35;
-        cursor: default;
-      }
+    &:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
+  }
+
+  // Zoom +/- buttons, stacked vertically at the bottom-right corner of the modal box.
+  & > .global-graph-outer > .graph-zoom-controls,
+  & > .local-graph-outer > .graph-zoom-controls {
+    position: fixed;
+    bottom: calc((100vh - 80vh) / 2 + 0.6rem);
+    right: calc((100vw - 80vw) / 2 + 0.6rem);
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+
+    @media all and (max-width: 800px) {
+      right: calc((100vw - 90vw) / 2 + 0.6rem); // matches the 90% box width above
     }
   }
 }

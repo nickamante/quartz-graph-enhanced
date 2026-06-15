@@ -310,6 +310,8 @@ import {
       var currentTransform = d3.zoomIdentity;
       var fitTimeout = null;
       var currentNodeLabel = null;
+      var zoomInHandler = null;
+      var zoomOutHandler = null;
 
       function nodeRadius(d) {
         var numLinks = 0;
@@ -651,6 +653,24 @@ import {
             if (t) d3.select(app.canvas).call(zoom.transform, t);
           }, opts.fitDelay || 600);
         }
+
+        // Zoom +/- buttons (modal only): drive d3's zoom so they stay in sync with scroll/pinch
+        // and respect the same scale limits. Each click eases by a fixed factor.
+        if (opts.zoomInButton && opts.zoomOutButton) {
+          zoomInHandler = function (e) {
+            e.stopPropagation();
+            d3.select(app.canvas).transition().duration(150).call(zoom.scaleBy, 1.4);
+          };
+          zoomOutHandler = function (e) {
+            e.stopPropagation();
+            d3.select(app.canvas)
+              .transition()
+              .duration(150)
+              .call(zoom.scaleBy, 1 / 1.4);
+          };
+          opts.zoomInButton.addEventListener("click", zoomInHandler);
+          opts.zoomOutButton.addEventListener("click", zoomOutHandler);
+        }
       }
 
       var stopAnimation = false;
@@ -695,6 +715,8 @@ import {
       return function () {
         stopAnimation = true;
         if (fitTimeout) clearTimeout(fitTimeout);
+        if (zoomInHandler) opts.zoomInButton.removeEventListener("click", zoomInHandler);
+        if (zoomOutHandler) opts.zoomOutButton.removeEventListener("click", zoomOutHandler);
         simulation.stop();
         try {
           app.destroy(true);
@@ -841,6 +863,10 @@ import {
             modal.savedTransform = transform;
           };
         }
+
+        // Zoom controls (when rendered for this modal) — bound to d3's zoom inside renderGraph.
+        renderOptions.zoomInButton = modal.outers[i].querySelector(".graph-zoom-in");
+        renderOptions.zoomOutButton = modal.outers[i].querySelector(".graph-zoom-out");
 
         (function (container, options) {
           renderGraph(container, currentSlug, undefined, options)
@@ -1026,7 +1052,7 @@ import {
         setupModalGraph(modals[i]);
       }
 
-      // Click outside a graph modal's box / icon / depth controls closes it.
+      // Click outside a graph modal's box / icon / controls closes it.
       if (documentClickHandler) {
         document.removeEventListener("click", documentClickHandler);
       }
@@ -1036,7 +1062,8 @@ import {
           if (!anyModalGraphActive(modal)) continue;
           var inContainer = e.target.closest(modal.graphContainerSelector);
           var inIcon = e.target.closest(modal.iconSelector);
-          var inControls = e.target.closest(".graph-depth-controls");
+          var inControls =
+            e.target.closest(".graph-depth-controls") || e.target.closest(".graph-zoom-controls");
           if (!inContainer && !inIcon && !inControls) {
             hideModalGraph(modal);
           }
